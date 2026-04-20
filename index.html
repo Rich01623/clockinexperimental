@@ -6,7 +6,7 @@
     <title>Frost Fleet Compliance</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
-        /* CSS Variables - Night Mode by Default */
+        /* CSS Variables - Default to Night Mode */
         :root { 
             --fts-red: #E62411; 
             --fts-dark: #1a1d1e; 
@@ -25,7 +25,7 @@
         .ticker__item { display: inline-block; padding: 0 40px; font-size: 13px; color: white; font-weight: bold; text-transform: uppercase; }
         @keyframes ticker-move { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
         
-        /* Layout & Typography */
+        /* Layout */
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg-color); color: var(--text-main); display: flex; flex-direction: column; align-items: center; padding-top: 110px; padding-bottom: 100px; }
         header { width: 100%; padding: 15px; display: flex; align-items: center; position: fixed; top: 35px; background: var(--card-bg); z-index: 100; border-bottom: 1px solid var(--border-color); }
         #menuBtn { font-size: 26px; color: var(--fts-red); cursor: pointer; padding: 4px 12px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--card-bg); }
@@ -51,7 +51,7 @@
         .status-badge { font-size: 10px; font-weight: 800; color: #fff; background: #333; padding: 4px 10px; border-radius: 4px; display: inline-block; margin-bottom: 12px; border: 1px solid #444; }
         .card-title { margin: 0; color: #fff; font-size: 19px; font-weight: 700; }
         
-        /* Buttons & Inputs */
+        /* Buttons & Controls */
         .btn { background: var(--fts-dark); color: white; text-align: center; padding: 16px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; display: block; border: 1px solid #444; cursor: pointer; transition: 0.2s; width: 100%; }
         .btn-red { background: var(--fts-red); border: none; }
         .btn-blue { background: var(--night-blue); border: none; }
@@ -63,7 +63,7 @@
         .full-width { grid-column: span 2; }
         .form-label { font-size: 11px; font-weight: bold; color: var(--text-dim); text-transform: uppercase; margin-top: 10px; display: block; }
 
-        /* Checklist Styles */
+        /* Checklist UI */
         .defect-list { margin: 15px 0; border-top: 1px solid var(--border-color); }
         .defect-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #2a2a2a; }
         .defect-name { font-size: 12px; font-weight: 600; color: #fff; }
@@ -148,8 +148,8 @@
 
                     <div class="defect-list" id="defectChecklist"></div>
 
-                    <span class="form-label">Driver Notes</span>
-                    <textarea id="checkNotes" class="notes-input" placeholder="Additional info on any defects..." rows="3"></textarea>
+                    <span class="form-label">Detailed Notes</span>
+                    <textarea id="checkNotes" class="notes-input" placeholder="Explain any fails or issues..." rows="3"></textarea>
 
                     <button id="saveCheckBtn" class="btn btn-red" onclick="submitVehicleCheck()">SUBMIT COMPLIANCE CHECK</button>
                     <button class="btn" style="background:none; color:#636e72; font-size:12px; margin-top:10px; border:none;" onclick="toggleVehicleForm()">Cancel</button>
@@ -196,7 +196,7 @@
 
         let timerInterval;
 
-        // Vehicle Form Functions
+        // --- CHECKLIST LOGIC ---
         function initChecklist() {
             const container = document.getElementById('defectChecklist');
             container.innerHTML = "";
@@ -233,7 +233,7 @@
             const miles = document.getElementById('mileage').value.trim();
             const driver = localStorage.getItem("frostUserName");
             const btn = document.getElementById('saveCheckBtn');
-            if (!reg || !miles) return alert("Please select Vehicle and enter Mileage.");
+            if (!reg || !miles) return alert("Select vehicle and enter mileage.");
 
             let fails = [];
             defectItems.forEach((item, index) => {
@@ -246,17 +246,17 @@
             btn.innerText = "SAVING..."; btn.disabled = true;
 
             try {
-                const { error } = await _supabase.from('daily vehicle checks').insert([{ 
+                const { error } = await _supabase.from('daily_vehicle_checks').insert([{ 
                     driver_name: driver, registration: reg, mileage: parseInt(miles), condition_status: condition, defect_details: summary
                 }]);
                 if (error) throw error;
                 alert("✅ COMPLIANCE SAVED: " + reg);
                 toggleVehicleForm();
-            } catch (err) { alert("❌ ERROR: Database check failed."); console.error(err); }
+            } catch (err) { alert("❌ ERROR: Could not sync to daily_vehicle_checks."); console.error(err); }
             finally { btn.innerText = "SUBMIT COMPLIANCE CHECK"; btn.disabled = false; }
         }
 
-        // Shift Functions
+        // --- SHIFT LOGIC ---
         async function logShift(action, noteText = null) {
             const userName = localStorage.getItem("frostUserName");
             if (!userName) return alert("Log in required.");
@@ -275,7 +275,7 @@
                     if (action === 'START') { localStorage.setItem("shiftStartTime", new Date().getTime()); startTimer(); }
                     else if (action === 'END') { localStorage.removeItem("shiftStartTime"); stopTimer(); }
                     else if (action === 'NOTE') document.getElementById('shiftNotesInput').value = "";
-                    alert(`✅ Shift Action Logged.`);
+                    alert(`✅ Logged: ${action}`);
                 } catch (err) { alert("❌ Data sync error."); }
                 finally { btn.innerText = originalText; updateButtonStates(); }
             }, () => { alert("❌ GPS REQUIRED."); btn.innerText = originalText; updateButtonStates(); });
@@ -292,7 +292,7 @@
 
         function startTimer() {
             const start = localStorage.getItem("shiftStartTime");
-            if (!start) { updateButtonStates(); return; }
+            if (!start) return;
             updateButtonStates();
             document.getElementById('shiftReminder').style.display = "block";
             if (timerInterval) clearInterval(timerInterval);
@@ -306,7 +306,7 @@
 
         function stopTimer() { clearInterval(timerInterval); document.getElementById('shiftReminder').style.display = "none"; updateButtonStates(); }
 
-        // Login & UI Functions
+        // --- AUTH & UI ---
         function checkLogin() {
             const user = document.getElementById('username').value.toLowerCase().trim();
             const pass = document.getElementById('password').value.trim();
