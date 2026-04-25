@@ -139,29 +139,49 @@
                 
                 <div id="vehicleCheckForm" style="display:none; margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 15px;">
                     <span class="form-label">Vehicle Registration</span>
-                    <select id="regNo" class="notes-input" style="background: #222;">
-                        <option value="">-- Select Vehicle --</option>
-                    </select>
-
+                    <select id="regNo" class="notes-input" style="background: #222;"></select>
                     <span class="form-label">Current Odometer (Miles)</span>
                     <input type="number" id="mileage" class="notes-input" placeholder="000000">
-
                     <div class="defect-list" id="defectChecklist"></div>
-
                     <span class="form-label">Detailed Notes</span>
                     <textarea id="checkNotes" class="notes-input" placeholder="Explain any fails or issues..." rows="3"></textarea>
-
                     <button id="saveCheckBtn" class="btn btn-red" onclick="submitVehicleCheck()">SUBMIT COMPLIANCE CHECK</button>
                     <button class="btn" style="background:none; color:#636e72; font-size:12px; margin-top:10px; border:none;" onclick="toggleVehicleForm()">Cancel</button>
                 </div>
             </div>
             
-            <div class="check-card" style="border-top-color: #333;"><div class="status-badge">FLEET OPERATIONS</div><h2 class="card-title">Daily trailer checks.</h2><a href="#" id="trailerLink" class="btn">Start checks</a></div>
-            <div class="check-card" style="border-top-color: #34495e;"><div class="status-badge">COST MANAGEMENT</div><h2 class="card-title">Fuel Log</h2><a href="#" id="fuelLink" class="btn" style="background: #34495e;">Submit Fuel Entry</a></div>
+            <div class="check-card" style="border-top-color: #333;">
+                <div class="status-badge">FLEET OPERATIONS</div>
+                <h2 class="card-title">Daily Trailer Check</h2>
+                <button id="showTrailerBtn" class="btn" onclick="toggleTrailerForm()" style="margin-top:10px;">START TRAILER CHECK</button>
+                <div id="trailerCheckForm" style="display:none; margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 15px;">
+                    <span class="form-label">Trailer Number</span>
+                    <select id="trailerNo" class="notes-input" style="background: #222;"></select>
+                    <div class="defect-list" id="trailerDefectChecklist"></div>
+                    <textarea id="trailerNotes" class="notes-input" placeholder="Trailer notes..." rows="2"></textarea>
+                    <button id="saveTrailerBtn" class="btn btn-red" onclick="submitTrailerCheck()">SUBMIT TRAILER CHECK</button>
+                </div>
+            </div>
+
+            <div class="check-card" style="border-top-color: #34495e;">
+                <div class="status-badge">COST MANAGEMENT</div>
+                <h2 class="card-title">Fuel Log</h2>
+                <button id="showFuelBtn" class="btn btn-blue" onclick="toggleFuelForm()" style="margin-top:10px;">LOG FUEL ENTRY</button>
+                <div id="fuelForm" style="display:none; margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 15px;">
+                    <span class="form-label">Vehicle</span>
+                    <select id="fuelRegNo" class="notes-input" style="background: #222;"></select>
+                    <span class="form-label">Litres</span>
+                    <input type="number" step="0.01" id="fuelLitres" class="notes-input" placeholder="0.00">
+                    <span class="form-label">Total Price (£)</span>
+                    <input type="number" step="0.01" id="fuelPrice" class="notes-input" placeholder="0.00">
+                    <button id="saveFuelBtn" class="btn btn-blue" onclick="submitFuel()">SUBMIT FUEL LOG</button>
+                </div>
+            </div>
+
             <div class="check-card" style="border-top-color: #000; background: #2a1111;">
                 <div class="status-badge" style="background: #000; color: #fff;">EMERGENCY RESPONSE</div>
                 <h2 class="card-title">Report an Accident</h2>
-                <a href="#" id="accidentLink" target="_blank" class="btn" style="background: #000; margin-top:15px; border-color:#441111;">I'VE HAD AN ACCIDENT</a>
+                <a href="https://docs.google.com/forms/d/e/1FAIpQLSc6p6l1vN7-G3rZ_SInT-Z9vPUP6_S3iS5-v5Z-X6-0e-y-Sg/viewform" id="accidentLink" target="_blank" class="btn" style="background: #000; margin-top:15px; border-color:#441111;">I'VE HAD AN ACCIDENT</a>
             </div>
         </div>
     </div>
@@ -172,8 +192,9 @@
         const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
         
         const fleetVehicles = ["BX15 JSU", "FD65 VZA", "FJ17 OPT", "FJ69 WMC", "FJ69 WML", "FN21 HLZ", "FR72 FTS", "FS72 FTS", "FT72 FTS", "HS19 YNH", "KU70 XNR", "KU70 XNS", "KU70 XNT", "KU70 XNV", "KU70 XNW", "KU70 XNX", "PN19 HDL"];
-
+        const fleetTrailers = ["FTSTR01","FTSTR02","FTSTR30","FTSTR41","FTSTR42","FTSTR44","FTSTR45","FTSTR46","FTSTR03","FTSTR04","FTSTR05","FTSTR09","FTSTR11","FTSTR12","FTSTR17","FTSTR21","FTSTR22","FTSTR23","FTSTR24","FTSTR25","FTSTR26","FTSTR27","FTSTR28","FTSTR31","FTSTR60","FTSTR61","FTSTR62","FTSTR63","FTSTR64"];
         const defectItems = ["Headlights","Side lights","Indicators","Tyre condition","Wheel nuts","Mirrors","Blindspot cameras","Steps and access","Bodywork","Windscreen","Windscreen wipers","Screen wash","Oil level","Coolant","Ad blue","Diesel","Number plates","5th Wheel and clip","Air lines and suzies","Dashboard warning lights"];
+        const trailerDefects = ["Tyre condition","Wheel nuts","Brake connections","Air lines","Lights & Indicators","Reflectors","Body/Curtains","Landing legs","Number plate","ABS/EBS Light"];
 
         const validUsers = {
             "frost": { pass: "Haulage2026", email: "richard@frosthaulage.co.uk" },
@@ -196,92 +217,107 @@
 
         let timerInterval;
 
-        // --- CHECKLIST LOGIC ---
-        function initChecklist() {
-            const container = document.getElementById('defectChecklist');
-            container.innerHTML = "";
-            defectItems.forEach((item, index) => {
-                const div = document.createElement('div');
-                div.className = 'defect-item';
+        // Form Toggles
+        function toggleVehicleForm() { const f = document.getElementById('vehicleCheckForm'); f.style.display = f.style.display === "none" ? "block" : "none"; if(f.style.display==="block") initChecklist('defectChecklist', defectItems); }
+        function toggleTrailerForm() { const f = document.getElementById('trailerCheckForm'); f.style.display = f.style.display === "none" ? "block" : "none"; if(f.style.display==="block") initChecklist('trailerDefectChecklist', trailerDefects); }
+        function toggleFuelForm() { const f = document.getElementById('fuelForm'); f.style.display = f.style.display === "none" ? "block" : "none"; }
+
+        // Checklist Init
+        function initChecklist(id, items) {
+            const container = document.getElementById(id); container.innerHTML = "";
+            items.forEach((item, index) => {
+                const div = document.createElement('div'); div.className = 'defect-item';
                 div.innerHTML = `<span class="defect-name">${item}</span><div class="defect-toggle">
-                    <button class="toggle-btn active-ok" id="ok-${index}" onclick="setToggle(${index}, 'OK')">OK</button>
-                    <button class="toggle-btn" id="fail-${index}" onclick="setToggle(${index}, 'FAIL')">FAIL</button>
+                    <button class="toggle-btn active-ok" id="${id}-ok-${index}" onclick="setToggle('${id}', ${index}, 'OK')">OK</button>
+                    <button class="toggle-btn" id="${id}-fail-${index}" onclick="setToggle('${id}', ${index}, 'FAIL')">FAIL</button>
                 </div>`;
                 container.appendChild(div);
             });
         }
 
-        function setToggle(index, status) {
-            const okBtn = document.getElementById(`ok-${index}`);
-            const failBtn = document.getElementById(`fail-${index}`);
-            if (status === 'OK') { okBtn.classList.add('active-ok'); failBtn.classList.remove('active-fail'); }
-            else { failBtn.classList.add('active-fail'); okBtn.classList.remove('active-ok'); }
+        function setToggle(id, index, status) {
+            const ok = document.getElementById(`${id}-ok-${index}`);
+            const fail = document.getElementById(`${id}-fail-${index}`);
+            if (status === 'OK') { ok.classList.add('active-ok'); fail.classList.remove('active-fail'); }
+            else { fail.classList.add('active-fail'); ok.classList.remove('active-ok'); }
         }
 
-        function toggleVehicleForm() {
-            const form = document.getElementById('vehicleCheckForm');
-            const mainBtn = document.getElementById('showCheckBtn');
-            if (form.style.display === "none") {
-                form.style.display = "block"; mainBtn.style.display = "none"; initChecklist();
-            } else {
-                form.style.display = "none"; mainBtn.style.display = "block";
-            }
-        }
+        // --- SUBMISSIONS ---
 
         async function submitVehicleCheck() {
             const reg = document.getElementById('regNo').value;
-            const miles = document.getElementById('mileage').value.trim();
+            const miles = document.getElementById('mileage').value;
             const driver = localStorage.getItem("frostUserName");
-            const btn = document.getElementById('saveCheckBtn');
             if (!reg || !miles) return alert("Select vehicle and enter mileage.");
+            
+            let fails = [];
+            defectItems.forEach((item, i) => { if(document.getElementById(`defectChecklist-fail-${i}`).classList.contains('active-fail')) fails.push(item); });
+            
+            try {
+                await _supabase.from('daily_vehicle_checks').insert([{ 
+                    driver_name: driver, registration: reg, mileage: parseInt(miles), 
+                    condition_status: fails.length > 0 ? "DEFECTS" : "NIL DEFECTS", 
+                    defect_details: fails.join(", ") + " | " + document.getElementById('checkNotes').value
+                }]);
+                alert("✅ Vehicle Check Saved"); toggleVehicleForm();
+            } catch (err) { alert("❌ Sync Error"); }
+        }
+
+        async function submitTrailerCheck() {
+            const trailer = document.getElementById('trailerNo').value;
+            const driver = localStorage.getItem("frostUserName");
+            if (!trailer) return alert("Select Trailer");
 
             let fails = [];
-            defectItems.forEach((item, index) => {
-                if (document.getElementById(`fail-${index}`).classList.contains('active-fail')) fails.push(item);
-            });
-
-            const condition = fails.length > 0 ? "DEFECTS REPORTED" : "NIL DEFECTS";
-            const summary = `FAILS: ${fails.length > 0 ? fails.join(", ") : "None"}. Notes: ${document.getElementById('checkNotes').value}`;
-
-            btn.innerText = "SAVING..."; btn.disabled = true;
+            trailerDefects.forEach((item, i) => { if(document.getElementById(`trailerDefectChecklist-fail-${i}`).classList.contains('active-fail')) fails.push(item); });
 
             try {
-                const { error } = await _supabase.from('daily_vehicle_checks').insert([{ 
-                    driver_name: driver, registration: reg, mileage: parseInt(miles), condition_status: condition, defect_details: summary
+                await _supabase.from('trailer_checks').insert([{ 
+                    driver_name: driver, trailer_id: trailer, 
+                    status: fails.length > 0 ? "DEFECTS" : "NIL DEFECTS", 
+                    details: fails.join(", ") + " | " + document.getElementById('trailerNotes').value
                 }]);
-                if (error) throw error;
-                alert("✅ COMPLIANCE SAVED: " + reg);
-                toggleVehicleForm();
-            } catch (err) { alert("❌ ERROR: Could not sync to daily_vehicle_checks."); console.error(err); }
-            finally { btn.innerText = "SUBMIT COMPLIANCE CHECK"; btn.disabled = false; }
+                alert("✅ Trailer Check Saved"); toggleTrailerForm();
+            } catch (err) { alert("❌ Sync Error"); }
         }
 
-        // --- SHIFT LOGIC ---
+        async function submitFuel() {
+            const reg = document.getElementById('fuelRegNo').value;
+            const litres = document.getElementById('fuelLitres').value;
+            const price = document.getElementById('fuelPrice').value;
+            if (!reg || !litres || !price) return alert("Fill all fields");
+            
+            navigator.geolocation.getCurrentPosition(async (pos) => {
+                try {
+                    await _supabase.from('fuel_logs').insert([{ 
+                        driver_name: localStorage.getItem("frostUserName"), 
+                        vehicle_reg: reg, litres: parseFloat(litres), price: parseFloat(price),
+                        coordinates: pos.coords.latitude + "," + pos.coords.longitude
+                    }]);
+                    alert("✅ Fuel Logged"); toggleFuelForm();
+                } catch (err) { alert("❌ Sync Error"); }
+            });
+        }
+
+        // --- SHIFT & UI ---
         async function logShift(action, noteText = null) {
             const userName = localStorage.getItem("frostUserName");
-            if (!userName) return alert("Log in required.");
+            if (!userName) return;
             if (action !== 'NOTE' && !confirm(`Confirm ${action}?`)) return;
             
-            const btnId = action === 'START' ? 'startBtn' : (action === 'END' ? 'endBtn' : (action === 'NOTE' ? 'submitNoteBtn' : 'nightBtn'));
-            const btn = document.getElementById(btnId);
-            const originalText = btn.innerText;
-            btn.innerText = "SAVING..."; btn.disabled = true;
-
-            navigator.geolocation.getCurrentPosition(async (position) => {
-                const loc = position.coords.latitude + "," + position.coords.longitude;
-                const email = validUsers[userName] ? validUsers[userName].email : "unknown";
+            navigator.geolocation.getCurrentPosition(async (pos) => {
+                const loc = pos.coords.latitude + "," + pos.coords.longitude;
                 try {
-                    await _supabase.from('fleet_logs').insert([{ driver_name: userName, driver_email: email, action_type: action, coordinates: loc, notes_text: noteText }]);
+                    await _supabase.from('fleet_logs').insert([{ driver_name: userName, action_type: action, coordinates: loc, notes_text: noteText }]);
                     if (action === 'START') { localStorage.setItem("shiftStartTime", new Date().getTime()); startTimer(); }
                     else if (action === 'END') { localStorage.removeItem("shiftStartTime"); stopTimer(); }
-                    else if (action === 'NOTE') document.getElementById('shiftNotesInput').value = "";
                     alert(`✅ Logged: ${action}`);
-                } catch (err) { alert("❌ Data sync error."); }
-                finally { btn.innerText = originalText; updateButtonStates(); }
-            }, () => { alert("❌ GPS REQUIRED."); btn.innerText = originalText; updateButtonStates(); });
+                } catch (err) { alert("❌ Sync error."); }
+                updateButtonStates();
+            });
         }
 
-        async function submitNote() { const text = document.getElementById('shiftNotesInput').value.trim(); if (text) await logShift('NOTE', text); }
+        async function submitNote() { const text = document.getElementById('shiftNotesInput').value.trim(); if (text) await logShift('NOTE', text); document.getElementById('shiftNotesInput').value = ""; }
         
         function updateButtonStates() {
             const active = localStorage.getItem("shiftStartTime") !== null;
@@ -306,13 +342,11 @@
 
         function stopTimer() { clearInterval(timerInterval); document.getElementById('shiftReminder').style.display = "none"; updateButtonStates(); }
 
-        // --- AUTH & UI ---
         function checkLogin() {
             const user = document.getElementById('username').value.toLowerCase().trim();
             const pass = document.getElementById('password').value.trim();
             if (validUsers[user] && validUsers[user].pass === pass) {
-                localStorage.setItem("frostLoggedIn", "true"); 
-                localStorage.setItem("frostUserName", user);
+                localStorage.setItem("frostLoggedIn", "true"); localStorage.setItem("frostUserName", user);
                 showDashboard(user);
             } else { document.getElementById('errorMsg').style.display = "block"; }
         }
@@ -321,17 +355,15 @@
             document.getElementById('loginOverlay').style.display = "none";
             document.getElementById('appContent').style.display = "flex";
             document.getElementById('welcomeUser').innerText = "Driver: " + name;
-            const regDropdown = document.getElementById('regNo');
-            regDropdown.innerHTML = '<option value="">-- Select Vehicle --</option>'; 
-            fleetVehicles.forEach(v => {
-                let opt = document.createElement('option'); opt.value = v; opt.innerHTML = v; regDropdown.appendChild(opt);
-            });
+
+            // Fill Dropdowns
+            const fill = (id, list) => {
+                const el = document.getElementById(id); el.innerHTML = '<option value="">-- Select --</option>';
+                list.forEach(v => { let o = document.createElement('option'); o.value=v; o.innerText=v; el.appendChild(o); });
+            };
+            fill('regNo', fleetVehicles); fill('fuelRegNo', fleetVehicles); fill('trailerNo', fleetTrailers);
+
             if (localStorage.getItem("shiftStartTime")) startTimer(); else updateButtonStates();
-            
-            document.getElementById('trailerLink').href = `https://docs.google.com/forms/d/1aMGoArb0Vp2lZX3m6gKQnYAplr6B8oDfdrGqDMJDz-A/viewform?entry.2036897075=${encodeURIComponent(name)}`;
-            const email = validUsers[name] ? validUsers[name].email : "";
-            document.getElementById('fuelLink').href = `https://docs.google.com/forms/d/e/1FAIpQLSdiPCfNcAOnN_ZZYPnBBzJDrbup2ZInButW3K_RniziV32TDg/viewform?usp=pp_url&entry.1436863426=${encodeURIComponent(name)}&entry.342429911=${encodeURIComponent(email)}`;
-            document.getElementById('accidentLink').href = `https://docs.google.com/forms/d/e/1FAIpQLSc6p6l1vN7-G3rZ_SInT-Z9vPUP6_S3iS5-v5Z-X6-0e-y-Sg/viewform?usp=pp_url&entry.123456789=${encodeURIComponent(name)}`;
         }
 
         function logout() { localStorage.clear(); location.reload(); }
