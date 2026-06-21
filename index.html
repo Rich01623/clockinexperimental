@@ -187,6 +187,15 @@
             
             <button id="activeDispatchBtn" onclick="openJobOverlay()">🚚 VIEW ACTIVE DISPATCH</button>
 
+            <div id="driverJobsCard" class="check-card" style="display:none; border-left:5px solid var(--accent-blue);">
+                <div class="card-header" style="margin-bottom:10px;">
+                    <span class="card-icon">📋</span>
+                    <h2 class="card-title">Jobs</h2>
+                </div>
+                <div id="driverJobsSummary" style="font-size:13px; color:var(--text-secondary); font-weight:600; margin-bottom:10px;"></div>
+                <div id="driverJobsList" style="display:flex; flex-direction:column; gap:10px;"></div>
+            </div>
+
             <div class="check-card">
                 <div class="card-header">
                     <span class="card-icon">⏱️</span>
@@ -360,11 +369,11 @@
             "agency one": "agent1", "agency two": "agent2", "agency three": "agent3", "agency four": "agent4",
             "andy carter": "ac26", "andy elston": "ae26", "andy west": "aw26", "barrie ashmore": "ba26", 
             "callum lee": "ca26", "chris frost": "cf26", "dean young": "dy26", "frost": "Haulage2026", 
-            "darren brown": "db26", "johannes van neerven": "jvn26", "jon hulbert": "jh26", "josh harrison": "jh26", 
+            "ian bason": "ib26", "johannes van neerven": "jvn26", "jon hulbert": "jh26", "josh harrison": "jh26", 
             "lee woodcock": "lw26", "marc wickham": "mw26", "marco marco": "mm26", "neil wood": "nw26", "neil woods": "nw26", 
             "rhys hill": "rh26", "ricardo morais": "rm26", "richard": "Frost2026", "richard robinson": "rr26", 
-            "richard spence": "rs26", "roy taylor": "rt26", "sean walton": "sw26", "stuart sleigh": "ss26", 
-            "svagunas butnorius": "sb26", "thomas broomhead": "tb26" 
+            "richard spence": "rs26", "roy taylor": "rt26", "sean walton": "sw26", "richard dickens": "rd26", 
+            "svagunas butnorius": "sb26", "myke trowbridge": "mt26" 
         };
 
         let timerInterval;
@@ -381,6 +390,48 @@
         function openJobOverlay() { document.getElementById('jobOverlay').classList.add('active'); }
         function closeJobOverlay() { document.getElementById('jobOverlay').classList.remove('active'); }
 
+        function normalisePushDriverName(value) {
+            return String(value || '').trim().toLowerCase();
+        }
+
+        async function saveDriverPushToken(tokenValue) {
+            const driverName = normalisePushDriverName(localStorage.getItem("frostUserName"));
+            if (!driverName || !tokenValue) return;
+
+            const tokenText = String(tokenValue || '').trim();
+            if (!tokenText) return;
+
+            const payload = {
+                driver_name: driverName,
+                fcm_token: tokenText,
+                platform: 'android',
+                device_label: navigator.userAgent || 'Frost Driver App',
+                active: true,
+                last_seen_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            };
+
+            try {
+                const { error } = await _supabase
+                    .from('driver_push_tokens')
+                    .upsert(payload, { onConflict: 'fcm_token' });
+
+                if (error) throw error;
+
+                localStorage.setItem('fcm_cached_token', tokenText);
+                localStorage.setItem('fcm_cached_driver', driverName);
+            } catch (err) {
+                console.warn('Could not save driver_push_tokens row, falling back to fleet_logs:', err && err.message ? err.message : err);
+                try {
+                    await _supabase.from('fleet_logs').insert([{ driver_name: driverName, action_type: 'FCM_TOKEN', coordinates: tokenText }]);
+                    localStorage.setItem('fcm_cached_token', tokenText);
+                    localStorage.setItem('fcm_cached_driver', driverName);
+                } catch (logErr) {
+                    console.warn('Could not save FCM token fallback:', logErr && logErr.message ? logErr.message : logErr);
+                }
+            }
+        }
+
         async function setupFirebasePush() {
             const cap = window.Capacitor || window.capacitor;
             if (!cap || !cap.Plugins.PushNotifications) return;
@@ -392,11 +443,7 @@
                 if (permStatus.receive === 'granted') await PushNotifications.register();
 
                 PushNotifications.addListener('registration', async (token) => {
-                    const currentToken = localStorage.getItem("fcm_cached_token");
-                    if (currentToken !== token.value) {
-                        await _supabase.from('fleet_logs').insert([{ driver_name: localStorage.getItem("frostUserName"), action_type: 'FCM_TOKEN', coordinates: token.value }]);
-                        localStorage.setItem("fcm_cached_token", token.value);
-                    }
+                    await saveDriverPushToken(token.value);
                 });
 
                 PushNotifications.addListener('pushNotificationReceived', (notification) => {
@@ -463,32 +510,266 @@
         }
         async function stopBackgroundTracking() { const cap = window.Capacitor || window.capacitor; if (trackingWatcherId && cap) { await cap.Plugins.BackgroundGeolocation.removeWatcher({ id: trackingWatcherId }); trackingWatcherId = null; } }
 
+        const ACTIVE_JOB_STATUSES = ['sent', 'acknowledged', 'arrived', 'loaded', 'del_arrived', 'tipped'];
+        const DRIVER_JOB_STATUSES = ['scheduled', ...ACTIVE_JOB_STATUSES];
+        const IN_PROGRESS_JOB_STATUSES = ['acknowledged', 'arrived', 'loaded', 'del_arrived', 'tipped'];
+        const ACTIVE_STATUS_PRIORITY = {
+            tipped: 6,
+            del_arrived: 5,
+            loaded: 4,
+            arrived: 3,
+            acknowledged: 2,
+            sent: 1
+        };
+
+        function driverShiftIsActive() {
+            return !!localStorage.getItem("shiftStartTime");
+        }
+
+        function localDateKeyFromValue(value) {
+            if (!value) return null;
+            const d = new Date(value);
+            if (isNaN(d.getTime())) {
+                const m = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
+                return m ? m[1] : null;
+            }
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        }
+
+        function todayLocalDateKey() {
+            const d = new Date();
+            const pad = n => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        }
+
+        function jobReleaseDateKey(job) {
+            return localDateKeyFromValue(job.dispatch_release_date) || localDateKeyFromValue(job.coll_datetime) || todayLocalDateKey();
+        }
+
+        function isScheduledJobDue(job) {
+            return jobReleaseDateKey(job) <= todayLocalDateKey();
+        }
+
+        function isActiveDispatchJob(job) {
+            return ACTIVE_JOB_STATUSES.includes(String(job.dispatch_status || '').toLowerCase());
+        }
+
+        function isInProgressDispatchJob(job) {
+            return IN_PROGRESS_JOB_STATUSES.includes(String(job.dispatch_status || '').toLowerCase());
+        }
+
+        function getFallbackQueueSequence(job) {
+            const raw = job && job.coll_datetime ? new Date(job.coll_datetime).getTime() : Date.now();
+            return Math.max(1, Math.floor((raw % 86400000) / 60000));
+        }
+
+        function sortDriverJobs(a, b) {
+            const dateA = jobReleaseDateKey(a);
+            const dateB = jobReleaseDateKey(b);
+            if (dateA !== dateB) return dateA.localeCompare(dateB);
+
+            const seqA = Number.isFinite(parseInt(a.dispatch_sequence, 10)) ? parseInt(a.dispatch_sequence, 10) : 9999;
+            const seqB = Number.isFinite(parseInt(b.dispatch_sequence, 10)) ? parseInt(b.dispatch_sequence, 10) : 9999;
+            if (seqA !== seqB) return seqA - seqB;
+
+            const timeA = a.coll_datetime ? new Date(a.coll_datetime).getTime() : 0;
+            const timeB = b.coll_datetime ? new Date(b.coll_datetime).getTime() : 0;
+            return timeA - timeB;
+        }
+
+        function sortActiveJobsForQueue(a, b) {
+            // If a job is already in progress, it must stay as the live job.
+            const aProgress = isInProgressDispatchJob(a) ? 1 : 0;
+            const bProgress = isInProgressDispatchJob(b) ? 1 : 0;
+            if (aProgress !== bProgress) return bProgress - aProgress;
+
+            const aPriority = ACTIVE_STATUS_PRIORITY[String(a.dispatch_status || '').toLowerCase()] || 0;
+            const bPriority = ACTIVE_STATUS_PRIORITY[String(b.dispatch_status || '').toLowerCase()] || 0;
+            if (aPriority !== bPriority) return bPriority - aPriority;
+
+            return sortDriverJobs(a, b);
+        }
+
+        async function parkJobBackToQueue(job) {
+            if (!job || !job.id) return false;
+
+            const queuePayload = {
+                dispatch_status: 'scheduled',
+                released_at: null,
+                dispatch_release_date: jobReleaseDateKey(job),
+                dispatch_sequence: job.dispatch_sequence || getFallbackQueueSequence(job)
+            };
+
+            // Try the full queue fields first. If the new columns have not been added yet,
+            // fall back to dispatch_status only so the driver app still enforces one active job.
+            let result = await _supabase.from('quotes').update(queuePayload).eq('id', job.id);
+            if (result && result.error) {
+                console.warn('Full queue update failed; falling back to dispatch_status only:', result.error.message || result.error);
+                result = await _supabase.from('quotes').update({ dispatch_status: 'scheduled' }).eq('id', job.id);
+            }
+
+            if (result && result.error) {
+                console.error('Could not park extra job back into queue:', result.error.message || result.error);
+                return false;
+            }
+            return true;
+        }
+
+        async function releaseNextScheduledJobForToday(driverJobs) {
+            if (!driverShiftIsActive()) return false;
+
+            const activeJobs = (driverJobs || []).filter(isActiveDispatchJob);
+            if (activeJobs.length > 0) return false;
+
+            const nextJob = (driverJobs || [])
+                .filter(job => String(job.dispatch_status || '').toLowerCase() === 'scheduled' && isScheduledJobDue(job))
+                .sort(sortDriverJobs)[0];
+
+            if (!nextJob) return false;
+
+            const releasePayload = {
+                dispatch_status: 'sent',
+                released_at: new Date().toISOString()
+            };
+
+            let result = await _supabase
+                .from('quotes')
+                .update(releasePayload)
+                .eq('id', nextJob.id)
+                .select('id, dispatch_status, released_at')
+                .maybeSingle();
+
+            if (result && result.error) {
+                console.warn('Full release update failed; falling back to dispatch_status only:', result.error.message || result.error);
+                result = await _supabase
+                    .from('quotes')
+                    .update({ dispatch_status: 'sent' })
+                    .eq('id', nextJob.id)
+                    .select('id, dispatch_status')
+                    .maybeSingle();
+            }
+
+            if (result && result.error) throw result.error;
+            if (!result || !result.data) throw new Error('Scheduled job could not be released because no matching quotes row was found.');
+            return true;
+        }
+
+        async function normaliseDriverJobQueue(driverJobs) {
+            let jobs = (driverJobs || []).sort(sortDriverJobs).map(job => ({ ...job }));
+            let activeJobs = jobs.filter(isActiveDispatchJob);
+            let changedDatabase = false;
+
+            // If the driver has not started shift, do not allow NEW sent jobs to sit live.
+            // This prevents Friday/Sunday preloads waking the driver or forcing early acknowledgement.
+            if (!driverShiftIsActive()) {
+                const inProgress = activeJobs.filter(isInProgressDispatchJob).sort(sortActiveJobsForQueue);
+                const keepJob = inProgress[0] || null;
+                const jobsToPark = activeJobs.filter(job => {
+                    const status = String(job.dispatch_status || '').toLowerCase();
+                    return status === 'sent' || (keepJob && job.id !== keepJob.id && status === 'sent');
+                });
+
+                for (const job of jobsToPark) {
+                    await parkJobBackToQueue(job);
+                    const local = jobs.find(j => j.id === job.id);
+                    if (local) {
+                        local.dispatch_status = 'scheduled';
+                        local.released_at = null;
+                        local.dispatch_release_date = local.dispatch_release_date || jobReleaseDateKey(local);
+                        local.dispatch_sequence = local.dispatch_sequence || getFallbackQueueSequence(local);
+                    }
+                    changedDatabase = true;
+                }
+
+                activeJobs = keepJob ? [keepJob] : [];
+                return { jobs, activeJobs, changedDatabase, released: false };
+            }
+
+            // Driver is on shift. If anything is already in progress, keep that one live.
+            // Otherwise keep only the first sent job live and queue all other sent jobs.
+            activeJobs = jobs.filter(isActiveDispatchJob).sort(sortActiveJobsForQueue);
+            if (activeJobs.length > 1) {
+                const keepJob = activeJobs[0];
+                const jobsToPark = activeJobs.slice(1).filter(job => String(job.dispatch_status || '').toLowerCase() === 'sent');
+
+                for (const job of jobsToPark) {
+                    await parkJobBackToQueue(job);
+                    const local = jobs.find(j => j.id === job.id);
+                    if (local) {
+                        local.dispatch_status = 'scheduled';
+                        local.released_at = null;
+                        local.dispatch_release_date = local.dispatch_release_date || jobReleaseDateKey(local);
+                        local.dispatch_sequence = local.dispatch_sequence || getFallbackQueueSequence(local);
+                    }
+                    changedDatabase = true;
+                }
+
+                activeJobs = [keepJob];
+            } else if (activeJobs.length === 1) {
+                activeJobs = [activeJobs[0]];
+            }
+
+            // If there is no active job and the driver is on shift, release the next due queued job.
+            if (activeJobs.length === 0) {
+                const released = await releaseNextScheduledJobForToday(jobs);
+                return { jobs, activeJobs: [], changedDatabase, released };
+            }
+
+            return { jobs, activeJobs, changedDatabase, released: false };
+        }
+
         async function fetchActiveJobs(manualSync = false) {
             const user = localStorage.getItem("frostUserName"); if (!user) return;
             try {
-                const { data: activeJobs, error } = await _supabase.from('quotes').select('*').eq('assigned_driver', user).in('dispatch_status', ['sent', 'acknowledged', 'arrived', 'loaded', 'del_arrived', 'tipped']).order('created_at', { ascending: false });
+                const { data: driverJobs, error } = await _supabase
+                    .from('quotes')
+                    .select('*')
+                    .eq('assigned_driver', user)
+                    .in('dispatch_status', DRIVER_JOB_STATUSES)
+                    .order('coll_datetime', { ascending: true, nullsFirst: false });
                 if (error) throw error;
 
+                const queueState = await normaliseDriverJobQueue(driverJobs || []);
+                if (queueState.released) {
+                    return fetchActiveJobs(manualSync);
+                }
+
+                const jobs = queueState.jobs.sort(sortDriverJobs);
+                const activeJobs = (queueState.activeJobs || []).filter(isActiveDispatchJob).slice(0, 1);
+
+                renderDriverJobsCard(jobs);
+
                 const btn = document.getElementById('activeDispatchBtn');
-                
-                if (!activeJobs || activeJobs.length === 0) {
-                    if (manualSync) alert("You are up to date! No pending tasks.");
-                    btn.style.display = 'none'; closeJobOverlay(); document.getElementById('jobOverlayList').innerHTML = ''; stopAlarm(); lastJobAlertCount = 0; return;
+
+                if (activeJobs.length === 0) {
+                    if (manualSync && jobs.length === 0) alert("You are up to date! No pending tasks.");
+                    btn.style.display = 'none';
+                    closeJobOverlay();
+                    document.getElementById('jobOverlayList').innerHTML = '';
+                    stopAlarm();
+                    lastJobAlertCount = 0;
+                    return;
                 }
 
                 btn.style.display = 'block';
                 renderActiveJobs(activeJobs);
 
-                const unacknowledgedJobs = activeJobs.filter(j => j.dispatch_status === 'sent');
+                const unacknowledgedJobs = activeJobs.filter(j => String(j.dispatch_status || '').toLowerCase() === 'sent');
                 if (unacknowledgedJobs.length > 0) {
-                    startAlarm(); 
+                    startAlarm();
                     if (unacknowledgedJobs.length > lastJobAlertCount) {
-                        fireNativeNotification("🚚 NEW LOAD DISPATCHED", "Tap to open Frost Fleet and acknowledge your new job.");
-                        openJobOverlay(); 
+                        fireNativeNotification("🚚 NEW LOAD DISPATCHED", "Tap to open Frost Fleet and acknowledge your next job.");
+                        openJobOverlay();
                     }
-                } else { stopAlarm(); }
+                } else {
+                    stopAlarm();
+                }
                 lastJobAlertCount = unacknowledgedJobs.length;
-            } catch(e) { console.error("Job Fetch Error:", e); if(manualSync) alert("Network error while syncing."); }
+            } catch(e) {
+                console.error("Job Fetch Error:", e);
+                if(manualSync) alert("Network error while syncing jobs: " + (e.message || e));
+            }
         }
 
         function escapeJobText(value) {
@@ -520,7 +801,7 @@
         function buildAddressLines(job, type) {
             const keys = type === 'collection'
                 ? [
-                    ['coll_company', 'collection_company'],
+                    ['coll_cust_name', 'collection_customer_name', 'collection_name', 'coll_company', 'collection_company'],
                     ['coll_address', 'collection_address'],
                     ['coll_street', 'collection_street'],
                     ['coll_town', 'collection_town'],
@@ -567,14 +848,14 @@
         }
 
         function buildCollectionCard(job, color = 'var(--accent-blue)') {
-            const bookingCustomer = firstJobValue(job, ['customer_name', 'booking_customer_name', 'cust_name']);
-            const phone = firstJobValue(job, ['customer_phone', 'coll_phone', 'coll_contact_phone', 'collection_phone', 'phone']);
-            const email = firstJobValue(job, ['customer_email', 'coll_email', 'collection_email']);
+            const collectionCustomer = firstJobValue(job, ['coll_cust_name', 'collection_customer_name', 'collection_name', 'coll_company', 'collection_company'], 'Collection Customer TBA');
+            const phone = firstJobValue(job, ['coll_phone', 'coll_contact_phone', 'collection_phone']);
+            const email = firstJobValue(job, ['coll_email', 'collection_email']);
             const coll2 = firstJobValue(job, ['coll_postcode_2', 'collection_postcode_2']);
             const collTown2 = firstJobValue(job, ['coll_town_2', 'collection_town_2']);
 
             return buildInfoCard('Collection Details', color, `
-                ${buildMiniRow('Booking Customer', bookingCustomer, true)}
+                ${buildMiniRow('Collection Customer', collectionCustomer, true)}
                 <div style="font-size:15px; line-height:1.45; color:var(--text-primary); font-weight:650; margin:8px 0 10px 0;">${buildAddressLines(job, 'collection')}</div>
                 ${buildMiniRow('Collection Phone', phone, true)}
                 ${buildMiniRow('Collection Email', email)}
@@ -604,7 +885,6 @@
             const rows = [
                 ['FTS Invoice Number', firstJobValue(job, ['fts_invoice_number'])],
                 ['Customer Invoice Number', firstJobValue(job, ['customers_own_invoice_number'])],
-                ['Job / Booking ID', firstJobValue(job, ['id'])],
                 ['Booking Number', firstJobValue(job, ['booking_number', 'booking_ref', 'customer_booking_number', 'load_number'])],
                 ['Customer Reference', firstJobValue(job, ['customer_reference', 'cust_ref', 'reference_number', 'ref_number'])]
             ];
@@ -666,6 +946,84 @@
             return String(jobId).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         }
 
+        function formatShortJobTime(value) {
+            if (!value) return 'Time TBA';
+            const d = new Date(value);
+            if (isNaN(d.getTime())) return escapeJobText(String(value).replace('T', ' '));
+            return d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: '2-digit' }) + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function formatReleaseDateForDriver(value) {
+            if (!value) return 'Date TBA';
+            const d = new Date(value + 'T12:00:00');
+            if (isNaN(d.getTime())) return escapeJobText(value);
+            return d.toLocaleDateString('en-GB', { weekday: 'long', day: '2-digit', month: '2-digit' });
+        }
+
+        function renderDriverJobsCard(jobs) {
+            const card = document.getElementById('driverJobsCard');
+            const list = document.getElementById('driverJobsList');
+            const summary = document.getElementById('driverJobsSummary');
+            if (!card || !list || !summary) return;
+
+            if (!jobs || jobs.length === 0) {
+                card.style.display = 'none';
+                list.innerHTML = '';
+                summary.innerHTML = '';
+                return;
+            }
+
+            const today = todayLocalDateKey();
+            const activeCount = jobs.filter(isActiveDispatchJob).length;
+            const todayScheduled = jobs.filter(j => String(j.dispatch_status || '').toLowerCase() === 'scheduled' && jobReleaseDateKey(j) <= today).length;
+            const futureScheduled = jobs.filter(j => String(j.dispatch_status || '').toLowerCase() === 'scheduled' && jobReleaseDateKey(j) > today).length;
+
+            card.style.display = 'block';
+            summary.innerHTML = `${activeCount ? activeCount + ' active job' + (activeCount > 1 ? 's' : '') + '. ' : ''}${todayScheduled ? todayScheduled + ' waiting for today. ' : ''}${futureScheduled ? futureScheduled + ' future scheduled.' : ''}` || 'Jobs loaded.';
+
+            list.innerHTML = jobs.map(job => {
+                const status = String(job.dispatch_status || '').toLowerCase();
+                const releaseDate = jobReleaseDateKey(job);
+                const isActive = isActiveDispatchJob(job);
+                const isDue = releaseDate <= today;
+                const customer = firstJobValue(job, ['coll_cust_name', 'collection_customer_name', 'collection_name', 'coll_company', 'collection_company'], 'Collection Customer TBA');
+                const route = `${firstJobValue(job, ['coll_postcode', 'coll_town'], 'Collection')} ➔ ${firstJobValue(job, ['del_postcode', 'del_town'], 'Delivery')}`;
+                let label = 'Scheduled';
+                let border = 'var(--border-color)';
+                let badgeBg = 'var(--text-secondary)';
+                let note = `Locked until ${formatReleaseDateForDriver(releaseDate)}.`;
+
+                if (isActive) {
+                    label = status === 'sent' ? 'New active job' : status.replace('_', ' ');
+                    border = 'var(--accent-blue)';
+                    badgeBg = status === 'sent' ? 'var(--accent-orange)' : 'var(--accent-blue)';
+                    note = 'Open Live Dispatch to continue this job.';
+                } else if (isDue && !driverShiftIsActive()) {
+                    label = 'Ready today';
+                    border = 'var(--accent-orange)';
+                    badgeBg = 'var(--accent-orange)';
+                    note = 'Press Start Shift to release your first job.';
+                } else if (isDue && driverShiftIsActive()) {
+                    label = 'Waiting next';
+                    border = 'var(--accent-purple)';
+                    badgeBg = 'var(--accent-purple)';
+                    note = 'This will release after the current active job is completed.';
+                }
+
+                return `
+                    <div style="border:1px solid ${border}; border-left:5px solid ${border}; border-radius:14px; padding:12px; background:#fff;">
+                        <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                            <div style="font-size:14px; font-weight:800; color:var(--text-primary);">${escapeJobText(customer)}</div>
+                            <div style="font-size:10px; font-weight:900; text-transform:uppercase; color:#fff; background:${badgeBg}; padding:5px 7px; border-radius:999px; white-space:nowrap;">${escapeJobText(label)}</div>
+                        </div>
+                        <div style="font-size:13px; color:var(--text-primary); font-weight:700; margin-top:8px;">${escapeJobText(route)}</div>
+                        <div style="font-size:12px; color:var(--text-secondary); font-weight:600; margin-top:5px;">${formatShortJobTime(job.coll_datetime)} · ${escapeJobText(note)}</div>
+                        ${isActive ? `<button class="btn" style="margin-top:10px; padding:10px; font-size:13px;" onclick="openJobOverlay()">Open Live Dispatch</button>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
         function renderActiveJobs(jobs) {
             const list = document.getElementById('jobOverlayList');
             list.innerHTML = '';
@@ -676,7 +1034,6 @@
             jobs.forEach(job => {
                 const dStatus = job.dispatch_status || 'sent';
                 const jobId = safeJobIdForClick(job.id);
-                const bookingCustomer = firstJobValue(job, ['customer_name', 'booking_customer_name', 'cust_name'], 'Customer TBA');
                 let btnHtml = '';
                 let badgeBg = 'var(--accent-green)';
                 let badgeText = 'NEW JOB';
@@ -689,9 +1046,6 @@
                         <div style="font-size:16px; font-weight:700; color:var(--text-primary); margin-bottom:12px;">
                             Hello ${escapeJobText(names.first)}, you have a new job.
                         </div>
-                        ${buildInfoCard('Booking Customer', 'var(--accent-orange)', `
-                            ${buildMiniRow('Customer Name', bookingCustomer, true)}
-                        `)}
                         ${buildCollectionCard(job, 'var(--accent-orange)')}
                     `;
                     btnHtml = `<button class="btn btn-urgent" onclick="acknowledgeJob('${jobId}')">⚠️ Acknowledge Job</button>`;
@@ -700,9 +1054,6 @@
                     badgeText = 'ON ROUTE TO COLLECTION';
                     badgeBg = 'var(--accent-blue)';
                     contentHtml = `
-                        ${buildInfoCard('Booking Customer', 'var(--accent-blue)', `
-                            ${buildMiniRow('Customer Name', bookingCustomer, true)}
-                        `)}
                         ${buildCollectionCard(job, 'var(--accent-blue)')}
                     `;
                     btnHtml = `<button class="btn" style="background:var(--accent-blue); margin-top:14px;" onclick="markArrived('${jobId}')">📍 Arrived at Collection</button>`;
@@ -762,8 +1113,65 @@
             });
         }
 
-                async function getGPS() { try { const cap = window.Capacitor || window.capacitor; if (cap && cap.Plugins.Geolocation) { const pos = await cap.Plugins.Geolocation.getCurrentPosition({ timeout: 10000 }); return `${pos.coords.latitude},${pos.coords.longitude}`; } } catch(e) {} return "GPS Not Available"; }
-        async function acknowledgeJob(jobId) { try { await _supabase.from('quotes').update({ dispatch_status: 'acknowledged', ack_timestamp: new Date().toISOString() }).eq('id', jobId); stopAlarm(); fetchActiveJobs(); } catch(e) { alert("Error: " + e.message); } }
+                async function getGPS() {
+            try {
+                const cap = window.Capacitor || window.capacitor;
+
+                if (cap && cap.Plugins && cap.Plugins.Geolocation) {
+                    const pos = await cap.Plugins.Geolocation.getCurrentPosition({
+                        enableHighAccuracy: true,
+                        timeout: 10000
+                    });
+
+                    if (pos && pos.coords) {
+                        return `${pos.coords.latitude},${pos.coords.longitude}`;
+                    }
+                }
+
+                if (navigator.geolocation) {
+                    return await new Promise((resolve) => {
+                        navigator.geolocation.getCurrentPosition(
+                            (pos) => resolve(`${pos.coords.latitude},${pos.coords.longitude}`),
+                            () => resolve("GPS Not Available"),
+                            { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+                        );
+                    });
+                }
+            } catch(e) {}
+
+            return "GPS Not Available";
+        }
+
+        async function acknowledgeJob(jobId) {
+            try {
+                const gps = await getGPS();
+
+                const { data, error } = await _supabase
+                    .from('quotes')
+                    .update({
+                        dispatch_status: 'acknowledged',
+                        ack_timestamp: new Date().toISOString(),
+                        ack_gps: gps
+                    })
+                    .eq('id', jobId)
+                    .select('id, dispatch_status, ack_timestamp, ack_gps')
+                    .maybeSingle();
+
+                if (error) throw error;
+
+                if (!data) {
+                    throw new Error(
+                        'Acknowledgement was not saved because no matching quotes row was found. ' +
+                        'Check that the job id matches quotes.id and that your Supabase update policy allows this app to update quotes.'
+                    );
+                }
+
+                stopAlarm();
+                fetchActiveJobs();
+            } catch(e) {
+                alert("Error saving acknowledgement GPS: " + (e.message || e));
+            }
+        }
         async function markArrived(jobId) { if(!confirm("Confirm you have arrived at the COLLECTION address?")) return; try { const gps = await getGPS(); await _supabase.from('quotes').update({ dispatch_status: 'arrived', arrived_timestamp: new Date().toISOString(), arrived_gps: gps }).eq('id', jobId); fetchActiveJobs(); } catch(e) { alert("Error: " + e.message); } }
         async function markLoaded(jobId) { if(!confirm("Confirm you are loaded and leaving collection?")) return; try { await _supabase.from('quotes').update({ dispatch_status: 'loaded', loaded_timestamp: new Date().toISOString() }).eq('id', jobId); fetchActiveJobs(); } catch(e) { alert("Error: " + e.message); } }
         async function markDelArrived(jobId) { if(!confirm("Confirm you have arrived at the DELIVERY address?")) return; try { await _supabase.from('quotes').update({ dispatch_status: 'del_arrived', del_arrived_timestamp: new Date().toISOString() }).eq('id', jobId); fetchActiveJobs(); } catch(e) { alert("Error: " + e.message); } }
@@ -1135,6 +1543,212 @@
             return { first, sur, full };
         }
 
+        function normaliseNameForHoliday(value) {
+            return String(value || '')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        function buildHolidayNameCandidates(userStr) {
+            const names = getFormattedNames(userStr || '');
+            const raw = String(userStr || '').trim();
+            const candidates = [
+                raw,
+                names.full,
+                `${names.first} ${names.sur}`.trim(),
+                names.first,
+                names.sur,
+                raw.replace(/\./g, ' '),
+                raw.replace(/_/g, ' '),
+                raw.replace(/-/g, ' ')
+            ]
+                .filter(Boolean)
+                .map(normaliseNameForHoliday)
+                .filter(Boolean);
+            return [...new Set(candidates)];
+        }
+
+        function getHolidayRowNameValues(row) {
+            if (!row) return [];
+            const values = [
+                row.full_name,
+                row.staff_name,
+                row.employee_name,
+                row.driver_name,
+                row.name,
+                row.staff_member,
+                row.member_name,
+                row.employee,
+                row.user_name,
+                row.display_name,
+                row.requested_by,
+                row.requester_name,
+                row.requested_by_name,
+                row.staff_full_name,
+                row.employee_full_name,
+                row.authorised_for,
+                row.holiday_for,
+                row.person_name,
+                row.first_name || row.surname ? `${row.first_name || ''} ${row.surname || ''}` : '',
+                row.first_name || row.last_name ? `${row.first_name || ''} ${row.last_name || ''}` : '',
+                row.forename || row.surname ? `${row.forename || ''} ${row.surname || ''}` : ''
+            ];
+
+            // If the row contains a nested staff profile object, include common fields from that too.
+            ['staff_profile', 'profile', 'staff', 'employee_profile'].forEach(key => {
+                const nested = row[key];
+                if (nested && typeof nested === 'object') {
+                    values.push(nested.full_name, nested.name, nested.staff_name, nested.employee_name);
+                    if (nested.first_name || nested.surname) values.push(`${nested.first_name || ''} ${nested.surname || ''}`);
+                    if (nested.first_name || nested.last_name) values.push(`${nested.first_name || ''} ${nested.last_name || ''}`);
+                }
+            });
+
+            return values.filter(Boolean).map(normaliseNameForHoliday).filter(Boolean);
+        }
+
+        function rowMatchesHolidayDriver(row, userStr) {
+            if (!row) return false;
+            const candidates = buildHolidayNameCandidates(userStr);
+            const rowNames = getHolidayRowNameValues(row);
+            if (!rowNames.length) return false;
+
+            return rowNames.some(rowName => candidates.some(candidate => {
+                if (!candidate) return false;
+                return rowName === candidate || rowName.includes(candidate) || candidate.includes(rowName);
+            }));
+        }
+
+        function firstNumberFromRow(row, keys, fallback = 0) {
+            for (const key of keys) {
+                if (row && row[key] !== undefined && row[key] !== null && row[key] !== '') {
+                    const n = Number(row[key]);
+                    return Number.isFinite(n) ? n : row[key];
+                }
+            }
+            return fallback;
+        }
+
+        function escapeHolidayText(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[ch]));
+        }
+
+        function formatHolidayDate(value) {
+            if (!value) return 'N/A';
+            const d = new Date(value);
+            if (isNaN(d)) return String(value);
+            return d.toLocaleDateString('en-GB');
+        }
+
+        function getHolidayStatus(row) {
+            return String(row?.status || row?.request_status || row?.authorisation_status || row?.approval_status || 'pending').trim();
+        }
+
+        function getHolidayStartDate(row) {
+            return row?.start_date || row?.holiday_start || row?.date_from || row?.from_date || row?.first_day || row?.leave_start || row?.holiday_from || null;
+        }
+
+        function getHolidayEndDate(row) {
+            return row?.end_date || row?.holiday_end || row?.date_to || row?.to_date || row?.last_day || row?.leave_end || row?.holiday_to || null;
+        }
+
+        function getHolidayRequestedDays(row) {
+            return firstNumberFromRow(row, ['days_requested', 'requested_days', 'number_of_days', 'days', 'holiday_days', 'total_days_requested'], '');
+        }
+
+        function getHolidayDenialReason(row) {
+            return row?.denial_reason || row?.decline_reason || row?.rejection_reason || row?.reason_denied || row?.manager_comments || '';
+        }
+
+        function holidaySortTime(row) {
+            const value = row?.created_at || row?.updated_at || row?.requested_at || getHolidayStartDate(row) || '';
+            const d = new Date(value);
+            return isNaN(d) ? 0 : d.getTime();
+        }
+
+        async function fetchHolidayRows(tableName, limit = 500) {
+            try {
+                const { data, error } = await _supabase
+                    .from(tableName)
+                    .select('*')
+                    .limit(limit);
+                if (error) {
+                    console.warn(`Holiday lookup failed for ${tableName}:`, error.message || error);
+                    return [];
+                }
+                return Array.isArray(data) ? data : [];
+            } catch (err) {
+                console.warn(`Holiday lookup exception for ${tableName}:`, err && err.message ? err.message : err);
+                return [];
+            }
+        }
+
+        function dedupeHolidayRows(rows) {
+            const seen = new Set();
+            const clean = [];
+            rows.forEach(row => {
+                if (!row) return;
+                const key = [
+                    row._holiday_source || '',
+                    row.id || row.request_id || row.holiday_request_id || '',
+                    getHolidayStartDate(row) || '',
+                    getHolidayEndDate(row) || '',
+                    getHolidayStatus(row) || '',
+                    JSON.stringify(getHolidayRowNameValues(row))
+                ].join('::');
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    clean.push(row);
+                }
+            });
+            return clean;
+        }
+
+        function addHolidaySource(rows, source) {
+            return (rows || []).map(row => ({ ...row, _holiday_source: source }));
+        }
+
+        function findHolidayEntitlementRow(rows, userStr) {
+            const matched = rows.filter(row => rowMatchesHolidayDriver(row, userStr));
+            if (matched.length) return matched[0];
+
+            // If the table only returns one row and there is no usable name field, use it rather than showing a blank card.
+            if (rows.length === 1 && getHolidayRowNameValues(rows[0]).length === 0) return rows[0];
+            return null;
+        }
+
+        async function fetchHolidaySummaryForDriver(userStr) {
+            const [entitlementRows, requestRows, viewRows] = await Promise.all([
+                fetchHolidayRows('holiday_entitlements', 500),
+                fetchHolidayRows('holiday_requests', 500),
+                fetchHolidayRows('holiday_requests_authorisation_view', 500)
+            ]);
+
+            const entitlement = findHolidayEntitlementRow(entitlementRows, userStr)
+                || findHolidayEntitlementRow(viewRows, userStr);
+
+            const matchedRequests = dedupeHolidayRows([
+                ...addHolidaySource(requestRows.filter(row => rowMatchesHolidayDriver(row, userStr)), 'holiday_requests'),
+                ...addHolidaySource(viewRows.filter(row => rowMatchesHolidayDriver(row, userStr)), 'holiday_requests_authorisation_view')
+            ]).sort((a, b) => holidaySortTime(b) - holidaySortTime(a));
+
+            return { entitlement, requests: matchedRequests };
+        }
+
+        // Backwards-compatible helper name used by older holiday code.
+        async function fetchHolidayEntitlementForDriver(userStr) {
+            const summary = await fetchHolidaySummaryForDriver(userStr);
+            return summary.entitlement;
+        }
+
         function toggleForm(id) {
             const f = document.getElementById(id); f.style.display = f.style.display === "none" ? "block" : "none";
             if(f.style.display === "block") { if(id === 'vehicleCheckForm') initChecklist('vehicleDefectList', vehicleItems, 'v'); if(id === 'trailerCheckForm') initChecklist('trailerDefectList', trailerItems, 't'); }
@@ -1143,18 +1757,67 @@
         async function toggleHoliday() {
             const f = document.getElementById('holidayForm'); f.style.display = f.style.display === "none" ? "block" : "none";
             if(f.style.display === "block") {
-                const user = localStorage.getItem("frostUserName"); const container = document.getElementById('holidayDataContent'); container.innerHTML = "Loading...";
+                const user = localStorage.getItem("frostUserName") || "";
+                const names = getFormattedNames(user || 'driver');
+                const container = document.getElementById('holidayDataContent');
+                container.innerHTML = "Loading...";
                 try {
-                    const names = getFormattedNames(user); const { data, error } = await _supabase.from('holiday_entitlements').select('total_entitlement, used_days, remaining_days').ilike('full_name', '%' + names.full + '%').limit(1);
-                    if (data && data.length > 0) {
-                        const h = data[0];
-                        container.innerHTML = `<div style="display: flex; justify-content: space-between; background: #fff; border: 1px solid var(--border-color); border-radius: 12px; padding: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); text-align: center;">
-                                <div><div style="font-size: 24px; font-weight: 700; color: var(--text-primary);">${h.total_entitlement}</div><div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; margin-top:4px; font-weight: 600;">Total</div></div>
-                                <div><div style="font-size: 24px; font-weight: 700; color: var(--accent-orange);">${h.used_days}</div><div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; margin-top:4px; font-weight: 600;">Used</div></div>
-                                <div><div style="font-size: 24px; font-weight: 700; color: var(--accent-green);">${h.remaining_days}</div><div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; margin-top:4px; font-weight: 600;">Left</div></div>
+                    const summary = await fetchHolidaySummaryForDriver(user);
+                    const h = summary.entitlement;
+                    const requests = summary.requests || [];
+
+                    let entitlementHtml = '';
+                    if (h) {
+                        const total = firstNumberFromRow(h, [
+                            'total_entitlement', 'total_days', 'entitlement', 'annual_entitlement', 'holiday_entitlement',
+                            'entitlement_days', 'yearly_entitlement', 'annual_leave_entitlement', 'contracted_holidays',
+                            'total_holidays', 'allowance', 'holiday_allowance'
+                        ], 0);
+                        const used = firstNumberFromRow(h, [
+                            'used_days', 'used', 'days_used', 'used_entitlement', 'holidays_used', 'used_holidays',
+                            'days_taken', 'taken_days', 'holiday_taken', 'holidays_taken', 'booked_days', 'approved_days'
+                        ], 0);
+                        const remaining = firstNumberFromRow(h, [
+                            'remaining_days', 'remaining', 'days_remaining', 'remaining_entitlement', 'holidays_remaining',
+                            'remaining_holidays', 'balance', 'holiday_balance', 'days_left', 'left_days'
+                        ], Math.max(Number(total || 0) - Number(used || 0), 0));
+                        entitlementHtml = `<div style="display: flex; justify-content: space-between; background: #fff; border: 1px solid var(--border-color); border-radius: 12px; padding: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); text-align: center;">
+                                <div><div style="font-size: 24px; font-weight: 700; color: var(--text-primary);">${escapeHolidayText(total)}</div><div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; margin-top:4px; font-weight: 600;">Total</div></div>
+                                <div><div style="font-size: 24px; font-weight: 700; color: var(--accent-orange);">${escapeHolidayText(used)}</div><div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; margin-top:4px; font-weight: 600;">Used</div></div>
+                                <div><div style="font-size: 24px; font-weight: 700; color: var(--accent-green);">${escapeHolidayText(remaining)}</div><div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase; margin-top:4px; font-weight: 600;">Left</div></div>
                             </div>`;
-                    } else { container.innerHTML = "No holiday data found for: " + names.full; }
-                } catch (e) { container.innerHTML = "Error loading data."; }
+                    } else {
+                        entitlementHtml = `<div style="background:#fff; border:1px solid var(--border-color); border-radius:12px; padding:14px; color:var(--text-secondary); font-size:13px; line-height:1.4;">
+                            No holiday entitlement row found for <strong>${escapeHolidayText(names.full)}</strong>.<br>
+                            The app checked <strong>holiday_entitlements</strong> and <strong>holiday_requests_authorisation_view</strong>.
+                        </div>`;
+                    }
+
+                    const recentRequests = requests.slice(0, 5);
+                    const requestHtml = recentRequests.length ? `
+                        <div style="margin-top:12px; text-align:left;">
+                            <div style="font-size:11px; font-weight:700; color:var(--text-secondary); text-transform:uppercase; margin-bottom:8px;">Recent Holiday Requests</div>
+                            <div style="display:flex; flex-direction:column; gap:8px;">
+                                ${recentRequests.map(req => {
+                                    const status = getHolidayStatus(req);
+                                    const s = status.toLowerCase();
+                                    const color = s.includes('approved') ? 'var(--accent-green)' : (s.includes('denied') || s.includes('declined') || s.includes('rejected') ? 'var(--accent-red)' : 'var(--accent-orange)');
+                                    const days = getHolidayRequestedDays(req);
+                                    const reason = getHolidayDenialReason(req);
+                                    return `<div style="background:#fff; border:1px solid var(--border-color); border-left:4px solid ${color}; border-radius:10px; padding:10px; font-size:12px; color:var(--text-primary);">
+                                        <div style="font-weight:700; color:${color}; text-transform:uppercase;">${escapeHolidayText(status || 'Pending')}</div>
+                                        <div>${escapeHolidayText(formatHolidayDate(getHolidayStartDate(req)))} to ${escapeHolidayText(formatHolidayDate(getHolidayEndDate(req)))}${days !== '' ? ` · ${escapeHolidayText(days)} day(s)` : ''}</div>
+                                        ${reason ? `<div style="color:var(--text-secondary); margin-top:4px;">Reason: ${escapeHolidayText(reason)}</div>` : ''}
+                                    </div>`;
+                                }).join('')}
+                            </div>
+                        </div>` : '';
+
+                    container.innerHTML = entitlementHtml + requestHtml;
+                } catch (e) {
+                    console.warn('Holiday entitlement render failed:', e && e.message ? e.message : e);
+                    container.innerHTML = "Error loading holiday entitlement. Please check table permissions/RLS for holiday_entitlements and holiday_requests.";
+                }
             }
         }
 
@@ -1163,22 +1826,41 @@
             if(f.style.display === "block") checkHolidayStatus();
         }
 
+        async function fetchHolidayStatusRowsForDriver(userStr) {
+            const [requestRows, viewRows] = await Promise.all([
+                fetchHolidayRows('holiday_requests', 500),
+                fetchHolidayRows('holiday_requests_authorisation_view', 500)
+            ]);
+            return dedupeHolidayRows([
+                ...addHolidaySource(requestRows.filter(row => rowMatchesHolidayDriver(row, userStr)), 'holiday_requests'),
+                ...addHolidaySource(viewRows.filter(row => rowMatchesHolidayDriver(row, userStr)), 'holiday_requests_authorisation_view')
+            ]).sort((a, b) => holidaySortTime(b) - holidaySortTime(a));
+        }
+
         async function checkHolidayStatus() {
-            const user = localStorage.getItem("frostUserName"); const names = getFormattedNames(user); const box = document.getElementById('holidayStatusBox');
+            const user = localStorage.getItem("frostUserName") || "";
+            const box = document.getElementById('holidayStatusBox');
             try {
-                const { data, error } = await _supabase.from('holiday_requests').select('status, denial_reason, start_date, end_date').eq('first_name', names.first).eq('surname', names.sur).order('created_at', { ascending: false }).limit(10);
+                const data = await fetchHolidayStatusRowsForDriver(user);
                 if (data && data.length > 0) {
                     box.style.display = 'flex'; box.innerHTML = ''; 
-                    data.forEach(req => {
-                        const s = req.status.toLowerCase(); let htmlText = ''; let color = ''; let border = '';
-                        if(s === 'pending') { htmlText = `⏳ Pending Request: ${req.start_date} to ${req.end_date}`; color = "var(--accent-orange)"; border = "1px solid rgba(255,149,0,0.3)"; } 
-                        else if (s === 'approved') { htmlText = `✅ Approved: ${req.start_date} to ${req.end_date}`; color = "var(--accent-green)"; border = "1px solid rgba(52,199,89,0.3)"; } 
-                        else if (s === 'denied') { htmlText = `❌ Denied: ${req.start_date} to ${req.end_date}<br><span style="color:var(--text-secondary); font-size:11px; margin-top:5px; display:block;">Reason: ${req.denial_reason || 'No reason provided'}</span>`; color = "var(--accent-red)"; border = "1px solid rgba(255,59,48,0.3)"; } 
-                        else { htmlText = `Status: ${req.status} (${req.start_date} to ${req.end_date})`; color = "var(--text-primary)"; border = "1px solid var(--border-color)"; }
+                    data.slice(0, 10).forEach(req => {
+                        const status = getHolidayStatus(req);
+                        const s = status.toLowerCase(); let htmlText = ''; let color = ''; let border = '';
+                        const start = formatHolidayDate(getHolidayStartDate(req));
+                        const end = formatHolidayDate(getHolidayEndDate(req));
+                        const reason = getHolidayDenialReason(req);
+                        if(s.includes('pending') || s.includes('awaiting')) { htmlText = `⏳ Pending Request: ${start} to ${end}`; color = "var(--accent-orange)"; border = "1px solid rgba(255,149,0,0.3)"; } 
+                        else if (s.includes('approved') || s.includes('authorised')) { htmlText = `✅ Approved: ${start} to ${end}`; color = "var(--accent-green)"; border = "1px solid rgba(52,199,89,0.3)"; } 
+                        else if (s.includes('denied') || s.includes('declined') || s.includes('rejected')) { htmlText = `❌ Denied: ${start} to ${end}<br><span style="color:var(--text-secondary); font-size:11px; margin-top:5px; display:block;">Reason: ${escapeHolidayText(reason || 'No reason provided')}</span>`; color = "var(--accent-red)"; border = "1px solid rgba(255,59,48,0.3)"; } 
+                        else { htmlText = `Status: ${escapeHolidayText(status)} (${start} to ${end})`; color = "var(--text-primary)"; border = "1px solid var(--border-color)"; }
                         box.innerHTML += `<div style="padding: 12px; border-radius: 10px; background: #fff; text-align: center; font-size: 13px; font-weight: 600; color: ${color}; border: ${border};">${htmlText}</div>`;
                     });
                 } else { box.style.display = 'none'; }
-            } catch (e) {}
+            } catch (e) {
+                console.warn('Holiday status lookup failed:', e && e.message ? e.message : e);
+                box.style.display = 'none';
+            }
         }
 
         async function submitHolidayRequest() {
@@ -1212,8 +1894,8 @@
             navigator.geolocation.getCurrentPosition(async (pos) => {
                 try {
                     await _supabase.from('fleet_logs').insert([{ driver_name: user, action_type: action, coordinates: pos.coords.latitude + "," + pos.coords.longitude, notes_text: noteText }]);
-                    if (action === 'START') { localStorage.setItem("shiftStartTime", new Date().getTime()); startTimer(); if (window.Capacitor && window.Capacitor.Plugins.KeepAwake) await window.Capacitor.Plugins.KeepAwake.keepAwake(); await startBackgroundTracking(); }
-                    else if (action === 'END') { localStorage.removeItem("shiftStartTime"); stopTimer(); if (window.Capacitor && window.Capacitor.Plugins.KeepAwake) await window.Capacitor.Plugins.KeepAwake.allowSleep(); await stopBackgroundTracking(); }
+                    if (action === 'START') { localStorage.setItem("shiftStartTime", new Date().getTime()); startTimer(); if (window.Capacitor && window.Capacitor.Plugins.KeepAwake) await window.Capacitor.Plugins.KeepAwake.keepAwake(); await startBackgroundTracking(); await fetchActiveJobs(true); }
+                    else if (action === 'END') { localStorage.removeItem("shiftStartTime"); stopTimer(); if (window.Capacitor && window.Capacitor.Plugins.KeepAwake) await window.Capacitor.Plugins.KeepAwake.allowSleep(); await stopBackgroundTracking(); await fetchActiveJobs(false); }
                     alert(`✅ ${action} Recorded`);
                 } catch (e) { alert(e.message); } updateButtons();
             }, () => alert("GPS Required"), { timeout: 8000 });
@@ -1288,8 +1970,13 @@
             if (backgroundJobTimer) clearInterval(backgroundJobTimer); backgroundJobTimer = setInterval(() => { if (localStorage.getItem("shiftStartTime")) { fetchActiveJobs(false); fetchBroadcasts(); } }, 30000);
 
             if (holidayChannel) _supabase.removeChannel(holidayChannel);
-            holidayChannel = _supabase.channel('custom-holiday-channel').on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'holiday_requests', filter: `first_name=eq.${names.first}` }, (payload) => {
-                checkHolidayStatus(); if(payload.new && payload.new.status && payload.new.surname === names.sur) { const newStatus = payload.new.status.toLowerCase(); if(newStatus === 'approved') alert('✅ Update: Your holiday request was APPROVED!'); if(newStatus === 'denied') alert('❌ Update: Your holiday request was DENIED. Reason: ' + (payload.new.denial_reason || 'None')); }
+            holidayChannel = _supabase.channel('custom-holiday-channel').on('postgres_changes', { event: '*', schema: 'public', table: 'holiday_requests' }, (payload) => {
+                const row = payload.new || payload.old || {};
+                if (!rowMatchesHolidayDriver(row, u)) return;
+                checkHolidayStatus();
+                const newStatus = getHolidayStatus(row).toLowerCase();
+                if(newStatus.includes('approved') || newStatus.includes('authorised')) alert('✅ Update: Your holiday request was APPROVED!');
+                if(newStatus.includes('denied') || newStatus.includes('declined') || newStatus.includes('rejected')) alert('❌ Update: Your holiday request was DENIED. Reason: ' + (getHolidayDenialReason(row) || 'None'));
             }).subscribe();
         }
 
